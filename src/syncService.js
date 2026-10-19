@@ -11,6 +11,7 @@
 
 import NetInfo from '@react-native-community/netinfo';
 import {
+  getProducts,
   getPendingProducts,
   markProductSynced,
   getDeletedProductIds,
@@ -80,7 +81,8 @@ export async function getWorkingApiUrl() {
 let isSyncing = false;
 
 // ૧. મુખ્ય સિંક ફંક્શન (નવા ઉમેરાયેલા અને ડિલીટ થયેલા બંને ડેટા સિંક કરે છે)
-export async function syncData() {
+export async function syncData(options = {}) {
+  const forceAll = options?.forceAll || false;
   if (isSyncing) return { success: false, reason: 'already_syncing' };
 
   // સર્વર શોધો (ADB reverse અથવા Wi-Fi LAN)
@@ -90,17 +92,17 @@ export async function syncData() {
     return { success: false, reason: 'offline' };
   }
 
-  // પેન્ડિંગ અને ડિલીટ થયેલા આઈડી લાવો
-  const pending = await getPendingProducts();
+  // જો forceAll હોય તો SQLite ની તમામ પ્રોડક્ટ્સ લાવો (જેથી સર્વર રીસ્ટાર્ટ થયું હોય તો પણ બધી પ્રોડક્ટ્સ ફરી MongoDB માં જતી રહે)
+  const itemsToSync = forceAll ? await getProducts() : await getPendingProducts();
   const deletedIds = await getDeletedProductIds();
 
-  if ((!pending || pending.length === 0) && (!deletedIds || deletedIds.length === 0)) {
+  if ((!itemsToSync || itemsToSync.length === 0) && (!deletedIds || deletedIds.length === 0)) {
     console.log('[Sync] Everything is already in sync.');
     return { success: true, count: 0, removedCount: 0, apiUrl };
   }
 
   isSyncing = true;
-  console.log(`[Sync] Syncing ${pending?.length || 0} products, deleting ${deletedIds?.length || 0} from MongoDB...`);
+  console.log(`[Sync] Syncing ${itemsToSync?.length || 0} products (forceAll=${forceAll}), deleting ${deletedIds?.length || 0} from MongoDB...`);
 
   try {
     console.log(`[Sync] Connecting to: ${apiUrl}/api/sync`);
@@ -109,7 +111,7 @@ export async function syncData() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        products: pending || [],
+        products: itemsToSync || [],
         deletedIds: deletedIds || [],
       }),
     });

@@ -92,3 +92,12 @@ export async function getDeletedProductIds() {
 export async function clearDeletedProductId(id) {
   await db.execute(`DELETE FROM deleted_products WHERE id = ?;`, [id]);
 }
+
+// ૮. પ્રોડક્ટ અપડેટ કરવી (નામ અને ભાવ બદલવા, સ્ટેટસ પાછું 'pending' કરવું જેથી બેકએન્ડમાં સિંક થાય)
+export async function updateProduct(id, name, price) {
+  await db.execute(
+    `UPDATE products SET name = ?, price = ?, syncStatus = 'pending' WHERE id = ?;`,
+    [name, Number(price), id]
+  );
+  return { id, name, price: Number(price), syncStatus: 'pending' };
+}

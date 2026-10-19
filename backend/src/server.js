@@ -128,6 +128,32 @@ app.delete('/api/products/:id', async (req, res) => {
   }
 });
 
+// (E) પ્રોડક્ટ અપડેટ કરવી (localId અથવા _id દ્વારા)
+app.put('/api/products/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { name, price } = req.body;
+    console.log(`[Server] Request to update product ID: ${id}`);
+    const updated = await Product.findOneAndUpdate(
+      {
+        $or: [
+          { localId: String(id) },
+          { _id: mongoose.isValidObjectId(id) ? id : null }
+        ]
+      },
+      { name, price: Number(price), updatedAt: new Date() },
+      { new: true }
+    );
+    if (!updated) {
+      return res.status(404).json({ success: false, error: 'Product not found' });
+    }
+    console.log(`[Server] Updated product in MongoDB: ${updated.name} (₹${updated.price})`);
+    res.json({ success: true, product: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ૪. બ્રાઉઝરમાં લાઈવ ડેટા જોવાનું પેજ (http://localhost:5000/view)
 app.get('/view', async (req, res) => {
   try {

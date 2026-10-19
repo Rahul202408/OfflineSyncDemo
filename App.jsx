@@ -25,13 +25,21 @@ import {
   Alert,
   ActivityIndicator,
   RefreshControl,
+  Modal,
+  KeyboardAvoidingView,
 } from 'react-native';
 import {
   SafeAreaProvider,
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
 
-import { initDB, addProduct, getProducts, deleteProduct } from './src/database';
+import {
+  initDB,
+  addProduct,
+  getProducts,
+  deleteProduct,
+  updateProduct,
+} from './src/database';
 import {
   syncData,
   startAutoSync,
@@ -50,6 +58,12 @@ function MainScreen() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [filter, setFilter] = useState('all'); // 'all' | 'pending' | 'synced'
 
+  // ✏️ એડિટ મોડલ માટે સ્ટેટ
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editItem, setEditItem] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [editPrice, setEditPrice] = useState('');
+
   // નોચ અને સ્ટેટસબાર નીચે સેફ સ્પેસિંગ
   const topPadding = Math.max(
     insets.top,
@@ -67,19 +81,20 @@ function MainScreen() {
       await initDB();
       await loadProducts();
 
-      // સર્વર URL શોધીને સ્ટેટસ સેટ કરો
-      const initialUrl = await getWorkingApiUrl();
-      if (initialUrl) {
-        setServerUrl(initialUrl.replace(/^https?:\/\//, ''));
+      // શરૂઆતમાં જ તમામ પ્રોડક્ટ્સ બેકએન્ડ સાથે સિંક કરો (forceAll: true)
+      const res = await syncData({ forceAll: true });
+      if (res?.apiUrl) {
+        setServerUrl(res.apiUrl.replace(/^https?:\/\//, ''));
       }
+      await loadProducts();
 
       // નેટવર્ક લિસનર (નેટ આવે ત્યારે આપોઆપ સિંક)
       startAutoSync(async isNetOn => {
         setOnline(isNetOn);
         if (isNetOn) {
-          const res = await syncData();
-          if (res?.apiUrl) {
-            setServerUrl(res.apiUrl.replace(/^https?:\/\//, ''));
+          const syncRes = await syncData({ forceAll: true });
+          if (syncRes?.apiUrl) {
+            setServerUrl(syncRes.apiUrl.replace(/^https?:\/\//, ''));
           }
           await loadProducts();
         }
@@ -135,10 +150,54 @@ function MainScreen() {
     await deleteProductFromServer(id);
   };
 
-  // ૪. મેન્યુઅલ "Sync Now" બટન
+  // ૪. પ્રોડક્ટ એડિટ કરવા માટેના હેન્ડલર્સ
+  const openEditModal = item => {
+    setEditItem(item);
+    setEditName(item.name);
+    setEditPrice(String(item.price));
+    setEditModalVisible(true);
+  };
+
+  const closeEditModal = () => {
+    setEditModalVisible(false);
+    setEditItem(null);
+    setEditName('');
+    setEditPrice('');
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editName.trim()) {
+      Alert.alert('Required', 'Please enter a product name');
+      return;
+    }
+    if (!editPrice.trim() || isNaN(Number(editPrice))) {
+      Alert.alert('Required', 'Please enter a valid price');
+      return;
+    }
+
+    const targetId = editItem.id;
+    const newName = editName.trim();
+    const newPrice = editPrice.trim();
+
+    closeEditModal();
+
+    // ૧. SQLite માં નામ અને ભાવ તાત્કાલિક અપડેટ કરો (સ્ટેટસ 'pending' થશે)
+    await updateProduct(targetId, newName, newPrice);
+    await loadProducts(); // UI તરત નવી વિગતો સાથે અપડેટ થશે
+
+    // ૨. બેકએન્ડ (MongoDB) માં પણ તરત સિંક કરો
+    const syncRes = await syncData();
+    if (syncRes?.apiUrl) {
+      setServerUrl(syncRes.apiUrl.replace(/^https?:\/\//, ''));
+    }
+    await loadProducts(); // સિંક થયા પછી 'synced' સ્ટેટસ અપડેટ થશે
+  };
+
+  // ૫. મેન્યુઅલ "Sync Now" બટન
   const handleManualSync = async () => {
     setIsSyncing(true);
-    const result = await syncData();
+    // મેન્યુઅલ સિંક પર તમામ પ્રોડક્ટ્સ મોંગોમાં મોકલો જેથી કોઈ બાકી ન રહે
+    const result = await syncData({ forceAll: true });
     if (result?.apiUrl) {
       setServerUrl(result.apiUrl.replace(/^https?:\/\//, ''));
     }
@@ -414,6 +473,15 @@ function MainScreen() {
                   </Text>
                 </View>
 
+                {/* એડિટ બટન */}
+                <TouchableOpacity
+                  onPress={() => openEditModal(item)}
+                  style={styles.editButton}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.editIcon}>✏️</Text>
+                </TouchableOpacity>
+
                 {/* ડિલીટ બટન */}
                 <TouchableOpacity
                   onPress={() => confirmDelete(item)}
@@ -441,6 +509,76 @@ function MainScreen() {
           </View>
         }
       />
+
+      {/* ✏️ પ્રોડક્ટ એડિટ કરવા માટેનું પોપઅપ મોડલ */}
+      <Modal
+        visible={editModalVisible}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={closeEditModal}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalOverlay}
+        >
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalHeaderTitleBox}>
+                <Text style={styles.modalTitle}>✏️ Edit Product</Text>
+                <Text style={styles.modalSub}>
+                  Change name or price, syncs instantly!
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={closeEditModal}
+                style={styles.modalCloseBtn}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalLabel}>Product Name</Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Product Name"
+              placeholderTextColor="#94A3B8"
+              value={editName}
+              onChangeText={setEditName}
+              autoCorrect={false}
+            />
+
+            <Text style={styles.modalLabel}>Price (₹)</Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Price"
+              placeholderTextColor="#94A3B8"
+              keyboardType="numeric"
+              value={editPrice}
+              onChangeText={setEditPrice}
+              autoCorrect={false}
+            />
+
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={styles.modalCancelBtn}
+                onPress={closeEditModal}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.modalSaveBtn}
+                onPress={handleSaveEdit}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.modalSaveText}>💾 Save & Sync</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -725,6 +863,122 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   deleteIcon: {
+    fontSize: 14,
+  },
+  editButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: '#EEF2FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  editIcon: {
+    fontSize: 14,
+  },
+  // એડિટ મોડલ સ્ટાઈલ્સ
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 16,
+  },
+  modalHeaderTitleBox: {
+    flex: 1,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  modalSub: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  modalCloseBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalCloseText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#64748B',
+  },
+  modalLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  modalInput: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    marginBottom: 14,
+  },
+  modalBtnRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  modalCancelBtn: {
+    flex: 1,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 10,
+    paddingVertical: 11,
+    alignItems: 'center',
+  },
+  modalCancelText: {
+    color: '#64748B',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  modalSaveBtn: {
+    flex: 2,
+    backgroundColor: '#4F46E5',
+    borderRadius: 10,
+    paddingVertical: 11,
+    alignItems: 'center',
+    shadowColor: '#4F46E5',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+    shadowRadius: 5,
+    elevation: 3,
+  },
+  modalSaveText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
     fontSize: 14,
   },
   // એમ્પટી સ્ટેટ કાર્ડ
