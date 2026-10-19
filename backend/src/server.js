@@ -18,6 +18,8 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const net = require('net');
+const os = require('os');
+const { exec } = require('child_process');
 
 const app = express();
 const PORT = 5000;
@@ -259,6 +261,19 @@ function checkPortOpen(port, host = '127.0.0.1', timeout = 300) {
   });
 }
 
+function getLocalIps() {
+  const interfaces = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        ips.push({ name, address: iface.address });
+      }
+    }
+  }
+  return ips;
+}
+
 // ૬. MongoDB સાથે કનેક્ટ થવું અને સર્વર ચાલુ કરવું
 async function start() {
   const isLocalMongoUp = await checkPortOpen(27017);
@@ -276,11 +291,21 @@ async function start() {
     console.log(`✅ [MongoDB] Embedded in-memory MongoDB online at: ${memUri}`);
   }
 
+  // જો એન્ડ્રોઇડ ફોન કનેક્ટેડ હોય તો ADB પોર્ટ ૫૦૦૦ આપોઆપ રિવર્સ કરો
+  exec('adb reverse tcp:5000 tcp:5000', (err) => {
+    if (!err) {
+      console.log('⚡ [ADB] Port 5000 forwarded to Android device automatically!');
+    }
+  });
+
   app.listen(PORT, HOST, () => {
+    const localIps = getLocalIps();
     console.log('====================================================');
     console.log(`🚀 BACKEND SERVER RUNNING AT: http://localhost:${PORT}`);
     console.log(`📊 BROWSER LIVE VIEWER:       http://localhost:${PORT}/view`);
-    console.log(`📱 MOBILE API BASE URL:       http://192.168.1.48:${PORT}`);
+    localIps.forEach((ip) => {
+      console.log(`📱 MOBILE API BASE URL (${ip.name}): http://${ip.address}:${PORT}`);
+    });
     console.log('====================================================');
   });
 }

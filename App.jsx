@@ -2,7 +2,7 @@
  * ========================================================
  * OFFLINE-FIRST SYNC DEMO — PREMIUM MODERN UI
  * ========================================================
- * 
+ *
  * ✨ Features:
  * ૧. Real-time Connection Banner (Online / Offline status pill)
  * ૨. Live Synchronization Stats (Total, Synced, Pending counters)
@@ -26,10 +26,18 @@ import {
   ActivityIndicator,
   RefreshControl,
 } from 'react-native';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 
 import { initDB, addProduct, getProducts, deleteProduct } from './src/database';
-import { syncData, startAutoSync, deleteProductFromServer } from './src/syncService';
+import {
+  syncData,
+  startAutoSync,
+  deleteProductFromServer,
+  getWorkingApiUrl,
+} from './src/syncService';
 
 function MainScreen() {
   const insets = useSafeAreaInsets();
@@ -38,13 +46,14 @@ function MainScreen() {
   const [name, setName] = useState('');
   const [price, setPrice] = useState('');
   const [online, setOnline] = useState(true);
+  const [serverUrl, setServerUrl] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
   const [filter, setFilter] = useState('all'); // 'all' | 'pending' | 'synced'
 
   // નોચ અને સ્ટેટસબાર નીચે સેફ સ્પેસિંગ
   const topPadding = Math.max(
     insets.top,
-    Platform.OS === 'android' ? (StatusBar.currentHeight || 28) : 20
+    Platform.OS === 'android' ? StatusBar.currentHeight || 28 : 20,
   );
 
   // ૧. SQLite માંથી બધી પ્રોડક્ટ્સ લોડ કરવી
@@ -58,11 +67,20 @@ function MainScreen() {
       await initDB();
       await loadProducts();
 
+      // સર્વર URL શોધીને સ્ટેટસ સેટ કરો
+      const initialUrl = await getWorkingApiUrl();
+      if (initialUrl) {
+        setServerUrl(initialUrl.replace(/^https?:\/\//, ''));
+      }
+
       // નેટવર્ક લિસનર (નેટ આવે ત્યારે આપોઆપ સિંક)
-      startAutoSync(async (isNetOn) => {
+      startAutoSync(async isNetOn => {
         setOnline(isNetOn);
         if (isNetOn) {
-          await syncData();
+          const res = await syncData();
+          if (res?.apiUrl) {
+            setServerUrl(res.apiUrl.replace(/^https?:\/\//, ''));
+          }
           await loadProducts();
         }
       });
@@ -84,17 +102,18 @@ function MainScreen() {
     await addProduct(name.trim(), price.trim());
     setName('');
     setPrice('');
-    await loadProducts(); // UI તરત અપડેટ થાય
+    await loadProducts(); // UI તરત અપડેટ થાય (Pending સાથે)
 
-    // જો નેટ હોય તો બેકગ્રાઉન્ડમાં શાંતિથી સિંક થાય
-    if (online) {
-      await syncData();
-      await loadProducts();
+    // બેકએન્ડ સિંક કરવાનો પ્રયાસ કરો (જો સર્વર ચાલુ હોય તો તરત Synced થશે)
+    const syncRes = await syncData();
+    if (syncRes?.apiUrl) {
+      setServerUrl(syncRes.apiUrl.replace(/^https?:\/\//, ''));
     }
+    await loadProducts();
   };
 
   // ૩. ડિલીટ કન્ફર્મેશન પોપઅપ
-  const confirmDelete = (item) => {
+  const confirmDelete = item => {
     Alert.alert(
       'Delete Product 🗑️',
       `Are you sure you want to delete "${item.name}"?`,
@@ -105,12 +124,12 @@ function MainScreen() {
           style: 'destructive',
           onPress: () => handleDelete(item.id),
         },
-      ]
+      ],
     );
   };
 
   // પ્રોડક્ટ ડિલીટ કરવી (SQLite + સર્વર બંનેમાંથી)
-  const handleDelete = async (id) => {
+  const handleDelete = async id => {
     await deleteProduct(id);
     await loadProducts();
     await deleteProductFromServer(id);
@@ -120,34 +139,52 @@ function MainScreen() {
   const handleManualSync = async () => {
     setIsSyncing(true);
     const result = await syncData();
+    if (result?.apiUrl) {
+      setServerUrl(result.apiUrl.replace(/^https?:\/\//, ''));
+    }
     await loadProducts();
     setIsSyncing(false);
 
     if (result?.success) {
-      if ((result.count && result.count > 0) || (result.removedCount && result.removedCount > 0)) {
+      if (
+        (result.count && result.count > 0) ||
+        (result.removedCount && result.removedCount > 0)
+      ) {
         let msg = '';
         if (result.count > 0) msg += `${result.count} product(s) synced. `;
-        if (result.removedCount > 0) msg += `${result.removedCount} removed from MongoDB.`;
+        if (result.removedCount > 0)
+          msg += `${result.removedCount} removed from MongoDB.`;
         Alert.alert('Synced ✅', msg);
       } else {
-        Alert.alert('Status ℹ️', 'All products are already synced with MongoDB.');
+        Alert.alert(
+          'Status ℹ️',
+          'All products are already synced with MongoDB.',
+        );
       }
     } else if (result?.reason === 'offline') {
-      Alert.alert('Offline ⚠️', 'Phone is offline. Please turn on Wi-Fi or Mobile Data.');
+      Alert.alert(
+        'Offline ⚠️',
+        'Phone cannot reach backend server. Make sure "npm start" is running in backend folder.',
+      );
     } else {
-      Alert.alert('Notice 📡', 'Trying to reach server. Make sure "npm start" is running in backend.');
+      Alert.alert(
+        'Notice 📡',
+        'Trying to reach server. Make sure "npm start" is running in backend.',
+      );
     }
   };
 
   // લાઇવ આંકડા (Stats)
   const totalCount = products.length;
-  const syncedCount = products.filter((p) => p.syncStatus === 'synced').length;
-  const pendingCount = products.filter((p) => p.syncStatus === 'pending').length;
+  const syncedCount = products.filter(p => p.syncStatus === 'synced').length;
+  const pendingCount = products.filter(p => p.syncStatus === 'pending').length;
 
   // ફિલ્ટર થયેલું લિસ્ટ
   const filteredProducts = useMemo(() => {
-    if (filter === 'pending') return products.filter((p) => p.syncStatus === 'pending');
-    if (filter === 'synced') return products.filter((p) => p.syncStatus === 'synced');
+    if (filter === 'pending')
+      return products.filter(p => p.syncStatus === 'pending');
+    if (filter === 'synced')
+      return products.filter(p => p.syncStatus === 'synced');
     return products;
   }, [products, filter]);
 
@@ -160,13 +197,34 @@ function MainScreen() {
         <View style={styles.headerTop}>
           <View>
             <Text style={styles.headerBrand}>⚡ OfflineSync Pro</Text>
-            <Text style={styles.headerSub}>SQLite ➔ MongoDB Live Sync</Text>
+            <Text style={styles.headerSub}>
+              {serverUrl ? `Backend: ${serverUrl} 🟢` : 'SQLite ➔ MongoDB Live Sync'}
+            </Text>
           </View>
 
           {/* નેટવર્ક સ્ટેટસ બેજ */}
-          <View style={[styles.netPill, { backgroundColor: online ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)' }]}>
-            <View style={[styles.netDot, { backgroundColor: online ? '#10B981' : '#EF4444' }]} />
-            <Text style={[styles.netText, { color: online ? '#10B981' : '#F87171' }]}>
+          <View
+            style={[
+              styles.netPill,
+              {
+                backgroundColor: online
+                  ? 'rgba(16, 185, 129, 0.15)'
+                  : 'rgba(239, 68, 68, 0.15)',
+              },
+            ]}
+          >
+            <View
+              style={[
+                styles.netDot,
+                { backgroundColor: online ? '#10B981' : '#EF4444' },
+              ]}
+            />
+            <Text
+              style={[
+                styles.netText,
+                { color: online ? '#10B981' : '#F87171' },
+              ]}
+            >
               {online ? 'Online' : 'Offline'}
             </Text>
           </View>
@@ -179,11 +237,15 @@ function MainScreen() {
             <Text style={styles.statLabel}>Total</Text>
           </View>
           <View style={[styles.statBox, styles.statBoxBorder]}>
-            <Text style={[styles.statNum, { color: '#10B981' }]}>{syncedCount}</Text>
+            <Text style={[styles.statNum, { color: '#10B981' }]}>
+              {syncedCount}
+            </Text>
             <Text style={styles.statLabel}>✓ Synced</Text>
           </View>
           <View style={styles.statBox}>
-            <Text style={[styles.statNum, { color: '#F59E0B' }]}>{pendingCount}</Text>
+            <Text style={[styles.statNum, { color: '#F59E0B' }]}>
+              {pendingCount}
+            </Text>
             <Text style={styles.statLabel}>⏳ Pending</Text>
           </View>
         </View>
@@ -214,7 +276,11 @@ function MainScreen() {
             />
           </View>
 
-          <TouchableOpacity style={styles.addBtn} onPress={handleAdd} activeOpacity={0.85}>
+          <TouchableOpacity
+            style={styles.addBtn}
+            onPress={handleAdd}
+            activeOpacity={0.85}
+          >
             <Text style={styles.addBtnText}>⚡ Save to SQLite (Instant)</Text>
           </TouchableOpacity>
         </View>
@@ -224,27 +290,51 @@ function MainScreen() {
           <View style={styles.filterTabs}>
             <TouchableOpacity
               onPress={() => setFilter('all')}
-              style={[styles.filterChip, filter === 'all' && styles.filterChipActive]}
+              style={[
+                styles.filterChip,
+                filter === 'all' && styles.filterChipActive,
+              ]}
             >
-              <Text style={[styles.filterText, filter === 'all' && styles.filterTextActive]}>
+              <Text
+                style={[
+                  styles.filterText,
+                  filter === 'all' && styles.filterTextActive,
+                ]}
+              >
                 All ({totalCount})
               </Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               onPress={() => setFilter('pending')}
-              style={[styles.filterChip, filter === 'pending' && styles.filterChipActive]}
+              style={[
+                styles.filterChip,
+                filter === 'pending' && styles.filterChipActive,
+              ]}
             >
-              <Text style={[styles.filterText, filter === 'pending' && styles.filterTextActive]}>
+              <Text
+                style={[
+                  styles.filterText,
+                  filter === 'pending' && styles.filterTextActive,
+                ]}
+              >
                 ⏳ Pending ({pendingCount})
               </Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               onPress={() => setFilter('synced')}
-              style={[styles.filterChip, filter === 'synced' && styles.filterChipActive]}
+              style={[
+                styles.filterChip,
+                filter === 'synced' && styles.filterChipActive,
+              ]}
             >
-              <Text style={[styles.filterText, filter === 'synced' && styles.filterTextActive]}>
+              <Text
+                style={[
+                  styles.filterText,
+                  filter === 'synced' && styles.filterTextActive,
+                ]}
+              >
                 ✓ Synced ({syncedCount})
               </Text>
             </TouchableOpacity>
@@ -269,10 +359,14 @@ function MainScreen() {
       {/* પ્રોડક્ટ્સ લિસ્ટ */}
       <FlatList
         data={filteredProducts}
-        keyExtractor={(item) => String(item.id)}
+        keyExtractor={item => String(item.id)}
         keyboardShouldPersistTaps="handled"
         refreshControl={
-          <RefreshControl refreshing={isSyncing} onRefresh={handleManualSync} colors={['#4F46E5']} />
+          <RefreshControl
+            refreshing={isSyncing}
+            onRefresh={handleManualSync}
+            colors={['#4F46E5']}
+          />
         }
         contentContainerStyle={styles.listContent}
         renderItem={({ item }) => {
@@ -287,7 +381,9 @@ function MainScreen() {
                   <Text style={styles.productName} numberOfLines={1}>
                     {item.name}
                   </Text>
-                  <Text style={styles.productPrice}>₹{Number(item.price).toFixed(2)}</Text>
+                  <Text style={styles.productPrice}>
+                    ₹{Number(item.price).toFixed(2)}
+                  </Text>
                 </View>
               </View>
 
@@ -339,7 +435,8 @@ function MainScreen() {
                 : `No ${filter} products`}
             </Text>
             <Text style={styles.emptyDesc}>
-              Add a product above. Even without internet, it saves instantly into SQLite!
+              Add a product above. Even without internet, it saves instantly
+              into SQLite!
             </Text>
           </View>
         }

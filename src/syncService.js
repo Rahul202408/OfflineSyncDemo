@@ -19,36 +19,62 @@ import {
 
 // સર્વર કનેક્શન URLs (ADB ટનલ, નવો Wi-Fi IP, જૂનો IP, Emulator)
 const CANDIDATE_URLS = [
-  'http://localhost:5000',     // ADB reverse પોર્ટ (ફોન માટે સૌથી ફાસ્ટ)
-  'http://192.168.1.39:5000',  // કમ્પ્યુટરનો વર્તમાન Wi-Fi IP
+  'http://localhost:5000',     // ADB reverse પોર્ટ (USB / Wi-Fi ADB દ્વારા સૌથી ફાસ્ટ)
+  'http://192.168.1.54:5000',  // કમ્પ્યુટરનો વર્તમાન Wi-Fi IP
+  'http://192.168.1.39:5000',  // અગાઉનો Wi-Fi IP
   'http://192.168.1.48:5000',  // જૂનો Wi-Fi IP
   'http://10.0.2.2:5000',      // એન્ડ્રોઇડ એમ્યુલેટર
 ];
 
 let workingUrl = null;
 
-// કયું સર્વર URL ચાલુ છે તે આપોઆપ શોધી લેશે
+// કયું સર્વર URL ચાલુ છે તે સમાંતર (Parallel) ઝડપથી શોધી લેશે
 export async function getWorkingApiUrl() {
-  if (workingUrl) return workingUrl;
-
-  for (const url of CANDIDATE_URLS) {
+  if (workingUrl) {
+    // પહેલાંથી મળેલો URL હજી કામ કરે છે કે નહીં તે ક્વિક ચેક કરો
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 1200);
-      const res = await fetch(`${url}/api/health`, { signal: controller.signal });
+      const timeout = setTimeout(() => controller.abort(), 1000);
+      const res = await fetch(`${workingUrl}/api/health`, { signal: controller.signal });
       clearTimeout(timeout);
-      if (res.ok) {
-        workingUrl = url;
-        console.log('[Sync] Active server found at:', url);
-        return workingUrl;
-      }
+      if (res.ok) return workingUrl;
     } catch (_) {
-      // આગળનું URL ટ્રાય કરો
+      workingUrl = null;
     }
   }
 
-  // જો કોઈ ન મળ્યું તો 192.168.1.39 વાપરો
-  return 'http://192.168.1.39:5000';
+  // બધા ઉમેદવાર URLs ને એકસાથે પિંગ કરો (જે સૌથી પહેલા જવાબ આપશે તે સિલેક્ટ થશે)
+  const probe = (url) =>
+    new Promise(async (resolve, reject) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error('Timeout'));
+      }, 1800);
+
+      try {
+        const res = await fetch(`${url}/api/health`, { signal: controller.signal });
+        clearTimeout(timer);
+        if (res.ok) {
+          resolve(url);
+        } else {
+          reject(new Error(`Status ${res.status}`));
+        }
+      } catch (err) {
+        clearTimeout(timer);
+        reject(err);
+      }
+    });
+
+  try {
+    const activeUrl = await Promise.any(CANDIDATE_URLS.map(probe));
+    workingUrl = activeUrl;
+    console.log('[Sync] Active server found at:', workingUrl);
+    return workingUrl;
+  } catch (err) {
+    console.warn('[Sync] No candidate server responded');
+    return null;
+  }
 }
 
 let isSyncing = false;
@@ -57,10 +83,10 @@ let isSyncing = false;
 export async function syncData() {
   if (isSyncing) return { success: false, reason: 'already_syncing' };
 
-  // નેટ ચેક કરો
-  const netState = await NetInfo.fetch();
-  if (!netState.isConnected) {
-    console.log('[Sync] Device is offline. Skipping sync.');
+  // સર્વર શોધો (ADB reverse અથવા Wi-Fi LAN)
+  const apiUrl = await getWorkingApiUrl();
+  if (!apiUrl) {
+    console.log('[Sync] Backend server is unreachable.');
     return { success: false, reason: 'offline' };
   }
 
@@ -70,14 +96,13 @@ export async function syncData() {
 
   if ((!pending || pending.length === 0) && (!deletedIds || deletedIds.length === 0)) {
     console.log('[Sync] Everything is already in sync.');
-    return { success: true, count: 0, removedCount: 0 };
+    return { success: true, count: 0, removedCount: 0, apiUrl };
   }
 
   isSyncing = true;
   console.log(`[Sync] Syncing ${pending?.length || 0} products, deleting ${deletedIds?.length || 0} from MongoDB...`);
 
   try {
-    const apiUrl = await getWorkingApiUrl();
     console.log(`[Sync] Connecting to: ${apiUrl}/api/sync`);
 
     const response = await fetch(`${apiUrl}/api/sync`, {
@@ -111,9 +136,10 @@ export async function syncData() {
         success: true,
         count: data.syncedIds?.length || 0,
         removedCount: data.removedIds?.length || 0,
+        apiUrl,
       };
     }
-    return { success: false, error: 'Failed to sync' };
+    return { success: false, error: 'Failed to sync', apiUrl };
   } catch (err) {
     console.warn('[Sync] Server unreachable:', err.message);
     workingUrl = null;
